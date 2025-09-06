@@ -1,0 +1,16 @@
+/* src/index.css */
+@import "tailwindcss";
+
+/* Optional: add any global resets or custom styles below */
+
+/* Example: smoother text rendering */
+html {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Example: set a default font family */
+body {
+  font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+    "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans", sans-serif;
+}
