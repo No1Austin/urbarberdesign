@@ -1,88 +1,396 @@
-const TARGET_CALENDAR_ID = "primary"; // or your dedicated calendar ID
-const SLOT_PADDING_MINUTES = 0; // add 5/10/15 for cleanup buffer if you want
+import React, { useMemo, useState } from "react";
 
-function doPost(e) {
-  try {
-    const data = JSON.parse(e.postData.contents || "{}");
-    if (!data.start || !data.end) return _json({ ok: false, message: "Missing start/end" });
 
-    const start = new Date(data.start);
-    const end   = new Date(data.end);
-
-    // Optional buffer window around the requested slot
-    if (SLOT_PADDING_MINUTES > 0) {
-      start.setMinutes(start.getMinutes() - SLOT_PADDING_MINUTES);
-      end.setMinutes(end.getMinutes() + SLOT_PADDING_MINUTES);
-    }
-
-    // Prevent race conditions
-    const lock = LockService.getScriptLock();
-    lock.waitLock(5000);
-
-    const cal = CalendarApp.getCalendarById(TARGET_CALENDAR_ID);
-
-    // Check overlap within a reasonable window
-    const existing = cal.getEvents(
-      new Date(start.getTime() - 12 * 60 * 60 * 1000),
-      new Date(end.getTime() + 12 * 60 * 60 * 1000)
-    );
-    const hasOverlap = existing.some(ev => start < ev.getEndTime() && end > ev.getStartTime());
-    if (hasOverlap) {
-      lock.releaseLock();
-      return _json({ ok: false, conflict: true, message: "This time slot is already booked. Please pick another time." });
-    }
-
-    // Create event using original unpadded times
-    const unpaddedStart = new Date(data.start);
-    const unpaddedEnd   = new Date(data.end);
-
-    const name  = data.fullName || "Client";
-    const title = `Urbarber - ${name}`;
-    const description =
-      `Gender: ${data.gender || "-"}\n` +
-      `Price: $${data.price ?? "-"}\n` +
-      `Phone: ${data.phone || "-"}\n` +
-      `Email: ${data.email || "-"}\n` +
-      `In-home: ${data.inHome ? "Yes" : "No"}\n` +
-      `Notes: ${data.notes || "-"}`;
-
-    const location = data.location || (data.inHome ? "Client address" : "Urbarber Barbershop");
-
-    const event = cal.createEvent(title, unpaddedStart, unpaddedEnd, { description, location });
-
-    // Optional: add guest so Google sends invite
-    if (data.email) {
-      try { event.addGuest(data.email); } catch (_) {}
-    }
-
-    // Optional: send a custom confirmation email
-    if (data.email) {
-      const fmt = Utilities.formatDate;
-      const tz = Session.getScriptTimeZone() || "America/Toronto";
-      const startStr = fmt(unpaddedStart, tz, "EEE, MMM d, yyyy h:mm a");
-      const endStr   = fmt(unpaddedEnd,   tz, "h:mm a");
-
-      const body =
-        `Hi ${name},\n\n` +
-        `Your appointment is confirmed.\n\n` +
-        `When: ${startStr} – ${endStr}\n` +
-        `Where: ${location}\n\n` +
-        `Details:\n${description}\n\n` +
-        `If you need to make changes, reply to this email.\n\n` +
-        `— Urbarber`;
-
-      try { MailApp.sendEmail(data.email, "Urbarber Appointment Confirmation", body); } catch (_) {}
-    }
-
-    lock.releaseLock();
-    return _json({ ok: true, id: event.getId(), htmlLink: event.getHtmlLink?.() });
-
-  } catch (err) {
-    return _json({ ok: false, message: err.message });
-  }
+function UrbarberLogo({ className = "w-10 h-10" }) {
+  return (
+    <img src="/logo.jpg" alt="Urbarber logo" className={`rounded-full object-cover ${className}`} />
+  );
 }
 
-function _json(obj) {
-  return ContentService.createTextOutput(JSON.stringify(obj))
-    .setMimeType(ContentService.MimeType.JSON);
+export default function App() {
+  // ---- Form state ----
+  const [form, setForm] = useState({
+    fullName: "",
+    gender: "Male",
+    email: "",
+    phone: "",
+    date: "",
+    time: "",
+    inHome: false,
+    location: "123 Main St, Your City", // used only if inHome = true
+    notes: "",
+  });
+
+  // ---- UI state ----
+  const [submitting, setSubmitting] = useState(false);
+  const [notice, setNotice] = useState(null); // { type: 'success' | 'error', message: string }
+
+  // ---- Pricing ----
+  const basePrice = 25;
+  const homeExtra = 10;
+  const price = useMemo(() => basePrice + (form.inHome ? homeExtra : 0), [form.inHome]);
+
+  // ---- Helpers ----
+  const handleChange = (e) => {
+    const { name, value, type, checked } = e.target;
+    setForm((f) => ({ ...f, [name]: type === "checkbox" ? checked : value }));
+  };
+
+  const valid = useMemo(() => {
+    return Boolean(
+      form.fullName.trim() &&
+        form.email.trim() &&
+        form.phone.trim() &&
+        form.date &&
+        form.time
+    );
+  }, [form]);
+
+  // ---- Submit booking ----
+  const handleBook = async () => {
+    setNotice(null);
+    if (!valid) {
+      setNotice({ type: "error", message: "Please complete all required fields." });
+      return;
+    }
+
+    const startLocal = new Date(`${form.date}T${form.time}`);
+    const endLocal = new Date(startLocal.getTime() + 45 * 60 * 1000); // 45-minute slot
+
+    setSubmitting(true);
+    try {
+      // 🔗 Your Google Apps Script URL
+      const webhook =
+        "https://script.google.com/macros/s/AKfycbyw3Ln84xL0fGm5b4RKlzllMXvO6QVSyQWp7OiLO5wvOFtbgddBmpaDVIuLRkr0lTVe9g/exec";
+
+      const res = await fetch(webhook, {
+        method: "POST",
+      headers: { "Content-Type": "text/plain;charset=utf-8" },
+
+        body: JSON.stringify({
+          fullName: form.fullName,
+          gender: form.gender,
+          email: form.email,
+          phone: form.phone,
+          start: startLocal.toISOString(),
+          end: endLocal.toISOString(),
+          inHome: form.inHome,
+          location: form.inHome ? form.location : "Urbarber Barbershop",
+          notes: form.notes,
+          price,
+        }),
+      });
+
+      const data = await res.json().catch(() => ({}));
+
+      if (res.ok && data.ok) {
+        setNotice({
+          type: "success",
+          message: "Successfully booked! A confirmation email has been sent.",
+        });
+        setForm((f) => ({ ...f, notes: "" })); // clear notes only
+      } else if (data?.conflict) {
+        setNotice({
+          type: "error",
+          message: data.message || "That time is already booked. Kindly choose another time.",
+        });
+      } else {
+        setNotice({
+          type: "error",
+          message: data?.message || "We couldn’t save your booking. Please try again later.",
+        });
+        console.warn("Booking server error:", data);
+      }
+    } catch (err) {
+      console.error("Webhook call failed:", err);
+      setNotice({
+        type: "error",
+        message: "Network error while saving your booking. Please try again.",
+      });
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  // ---- Notice banner ----
+  const NoticeBanner = ({ notice }) => {
+    if (!notice) return null;
+    const styles = {
+      success: "bg-emerald-600/20 border-emerald-500 text-emerald-100",
+      error: "bg-red-600/20 border-red-500 text-red-100",
+      info: "bg-sky-600/20 border-sky-500 text-sky-100",
+    };
+    return (
+      <div className={`mt-4 p-3 rounded-xl border ${styles[notice.type] || styles.info}`}>
+        {notice.message}
+      </div>
+    );
+  };
+
+  const SERVICES = [
+    { name: "Standard Cut", img: "/services/standard.jpg", desc: "Clean, sharp, and tailored to you.", price: "$25" },
+    { name: "Beard Trim", img: "/services/beard.jpg", desc: "Crisp edges and shape for your beard.", price: "$25" },
+    { name: "Line Up", img: "/services/line.jpg", desc: "Sharp line work to keep you fresh.", price: "$25" },
+  ];
+
+  return (
+    <div className="min-h-screen bg-[#3b2f2f] text-white">
+      {/* NAVBAR */}
+      <header className="sticky top-0 z-40 backdrop-blur bg-white/80 border-b border-neutral-200">
+        <div className="max-w-6xl mx-auto px-4 py-3 flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <UrbarberLogo className="w-9 h-9" />
+            <span className="font-bold text-xl tracking-tight text-neutral-900">Urbarber</span>
+          </div>
+          <nav className="hidden md:flex gap-6 text-sm text-neutral-800">
+            <a href="#services" className="hover:opacity-80">Services</a>
+            <a href="#pricing" className="hover:opacity-80">Pricing</a>
+            <a href="#booking" className="hover:opacity-80">Book</a>
+            <a href="#contact" className="hover:opacity-80">Contact</a>
+          </nav>
+          <a href="#booking" className="px-4 py-2 rounded-2xl bg-black text-white text-sm shadow">Book now</a>
+        </div>
+      </header>
+
+      <main>
+        {/* HERO */}
+        <section className="max-w-6xl mx-auto px-4 py-16 grid md:grid-cols-2 gap-10 items-center">
+          <div>
+            <h1 className="text-4xl md:text-5xl font-extrabold leading-tight">
+              Fresh fades, clean lines. <span className="text-gray-300">On your schedule.</span>
+            </h1>
+            <p className="mt-4 text-gray-200">
+              Modern cuts in-shop or right at your doorstep. Simple pricing, easy booking.
+            </p>
+            <div className="mt-6 flex gap-3">
+              <a href="#booking" className="px-5 py-3 rounded-2xl bg-black text-white text-sm shadow">Book an appointment</a>
+              <a href="#services" className="px-5 py-3 rounded-2xl border border-[#7a6161] text-sm">See services</a>
+            </div>
+            <div className="mt-6 text-xs text-gray-300">From $25 • +$10 home service</div>
+          </div>
+          <div className="rounded-3xl overflow-hidden shadow-lg border border-[#7a6161]">
+            <img src="/barbing.jpg" alt="Barber at work" className="w-full h-full object-cover" />
+          </div>
+        </section>
+
+        {/* SERVICES */}
+        <section id="services" className="bg-[#4a3a3a] border-y border-[#6b5555]">
+          <div className="max-w-6xl mx-auto px-4 py-14">
+            <h2 className="text-2xl font-bold">Services</h2>
+            <div className="mt-6 grid md:grid-cols-3 gap-6">
+              {SERVICES.map((s) => (
+                <div key={s.name} className="p-6 rounded-3xl border border-[#7a6161] shadow-sm bg-[#5c4646]">
+                  <div className="rounded-2xl overflow-hidden border border-[#7a6161]">
+                    <img src={s.img} alt={s.name} className="w-full h-40 object-cover" loading="lazy" />
+                  </div>
+                  <div className="mt-4 font-semibold">{s.name}</div>
+                  <div className="text-sm text-gray-200">{s.desc}</div>
+                  <div className="mt-2 text-sm text-gray-300">{s.price}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </section>
+
+        {/* PRICING */}
+        <section id="pricing" className="max-w-6xl mx-auto px-4 py-14">
+          <h2 className="text-2xl font-bold">Pricing</h2>
+          <div className="mt-6 grid md:grid-cols-2 gap-6">
+            <div className="p-6 rounded-3xl border border-[#7a6161] shadow-sm bg-[#5c4646]">
+              <div className="text-sm uppercase text-gray-300">Base</div>
+              <div className="text-3xl font-extrabold mt-2">${basePrice}</div>
+              <div className="text-sm text-gray-200 mt-1">In-shop appointment</div>
+            </div>
+            <div className="p-6 rounded-3xl border border-[#7a6161] shadow-sm bg-[#5c4646]">
+              <div className="text-sm uppercase text-gray-300">Home Service</div>
+              <div className="text-3xl font-extrabold mt-2">${basePrice + homeExtra}</div>
+              <div className="text-sm text-gray-200 mt-1">We come to you (+$10)</div>
+            </div>
+          </div>
+        </section>
+
+        {/* BOOKING */}
+        <section id="booking" className="bg-[#4a3a3a] border-y border-[#6b5555]">
+          <div className="max-w-6xl mx-auto px-4 py-14">
+            <h2 className="text-2xl font-bold">Book an appointment</h2>
+            <p className="mt-2 text-gray-200 text-sm">
+              Fill in your details. After booking, you’ll see a success message here and receive a confirmation email.
+            </p>
+
+            <div className="mt-6 grid md:grid-cols-2 gap-6">
+              {/* Form */}
+              <div className="p-6 rounded-3xl border border-[#7a6161] shadow-sm bg-[#5c4646]">
+                <div className="grid gap-4">
+                  <label className="grid gap-1 text-sm">
+                    <span>Full name</span>
+                    <input
+                      name="fullName"
+                      value={form.fullName}
+                      onChange={handleChange}
+                      className="px-3 py-2 rounded-xl border border-[#7a6161] bg-[#3b2f2f] text-white placeholder-gray-300 focus:outline-none"
+                      placeholder="Your name"
+                    />
+                  </label>
+
+                  <label className="grid gap-1 text-sm">
+                    <span>Gender</span>
+                    <select
+                      name="gender"
+                      value={form.gender}
+                      onChange={handleChange}
+                      className="px-3 py-2 rounded-xl border border-[#7a6161] bg-[#3b2f2f] text-white focus:outline-none"
+                    >
+                      <option>Male</option>
+                      <option>Female</option>
+                      <option>Non-binary</option>
+                      <option>Prefer not to say</option>
+                    </select>
+                  </label>
+
+                  <div className="grid grid-cols-2 gap-4">
+                    <label className="grid gap-1 text-sm">
+                      <span>Date</span>
+                      <input
+                        type="date"
+                        name="date"
+                        value={form.date}
+                        onChange={handleChange}
+                        className="px-3 py-2 rounded-xl border border-[#7a6161] bg-[#3b2f2f] text-white focus:outline-none"
+                      />
+                    </label>
+                    <label className="grid gap-1 text-sm">
+                      <span>Time</span>
+                      <input
+                        type="time"
+                        name="time"
+                        value={form.time}
+                        onChange={handleChange}
+                        className="px-3 py-2 rounded-xl border border-[#7a6161] bg-[#3b2f2f] text-white focus:outline-none"
+                      />
+                    </label>
+                  </div>
+
+                  <label className="grid gap-1 text-sm">
+                    <span>Phone</span>
+                    <input
+                      name="phone"
+                      value={form.phone}
+                      onChange={handleChange}
+                      className="px-3 py-2 rounded-xl border border-[#7a6161] bg-[#3b2f2f] text-white placeholder-gray-300 focus:outline-none"
+                      placeholder="(555) 555-5555"
+                    />
+                  </label>
+
+                  <label className="grid gap-1 text-sm">
+                    <span>Email</span>
+                    <input
+                      type="email"
+                      name="email"
+                      value={form.email}
+                      onChange={handleChange}
+                      className="px-3 py-2 rounded-xl border border-[#7a6161] bg-[#3b2f2f] text-white placeholder-gray-300 focus:outline-none"
+                      placeholder="you@example.com"
+                    />
+                  </label>
+
+                  <label className="inline-flex items-center gap-2 text-sm">
+                    <input type="checkbox" name="inHome" checked={form.inHome} onChange={handleChange} />
+                    <span>Home service (we come to you)</span>
+                  </label>
+
+                  {form.inHome && (
+                    <label className="grid gap-1 text-sm">
+                      <span>Home address</span>
+                      <input
+                        name="location"
+                        value={form.location}
+                        onChange={handleChange}
+                        className="px-3 py-2 rounded-xl border border-[#7a6161] bg-[#3b2f2f] text-white placeholder-gray-300 focus:outline-none"
+                        placeholder="Street, City"
+                      />
+                    </label>
+                  )}
+
+                  <label className="grid gap-1 text-sm">
+                    <span>Notes (optional)</span>
+                    <textarea
+                      name="notes"
+                      value={form.notes}
+                      onChange={handleChange}
+                      className="px-3 py-2 rounded-xl border border-[#7a6161] bg-[#3b2f2f] text-white placeholder-gray-300 focus:outline-none"
+                      placeholder="Any preferences"
+                    />
+                  </label>
+
+                  <div className="flex items-center justify-between mt-2">
+                    <div className="text-sm text-gray-200">Price</div>
+                    <div className="font-bold text-lg">${price}</div>
+                  </div>
+
+                  <button
+                    disabled={!valid || submitting}
+                    onClick={handleBook}
+                    className={`mt-2 px-5 py-3 rounded-2xl text-sm shadow ${
+                      valid && !submitting ? "bg-black text-white" : "bg-[#7a6161] text-gray-300"
+                    }`}
+                  >
+                    {submitting ? "Booking..." : "Book now"}
+                  </button>
+
+                  <NoticeBanner notice={notice} />
+                  <div className="text-xs text-gray-300">No online payment required.</div>
+                </div>
+              </div>
+
+              {/* Info card */}
+              <div className="p-6 rounded-3xl border border-[#7a6161] shadow-sm bg-[#5c4646]">
+                <h3 className="font-semibold">How it works</h3>
+                <ol className="list-decimal ml-5 mt-3 space-y-2 text-sm text-gray-200">
+                  <li>Fill your details and choose in-shop or home service.</li>
+                  <li>We save your booking on our calendar (no downloads needed).</li>
+                  <li>You receive a confirmation email/Google invite automatically.</li>
+                </ol>
+                <div className="mt-4 p-4 rounded-2xl bg-[#3b2f2f] border border-[#7a6161] text-sm">
+                  See you soon!
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        {/* CONTACT */}
+        <section id="contact" className="max-w-6xl mx-auto px-4 py-14">
+          <h2 className="text-2xl font-bold">Contact</h2>
+          <div className="mt-4 grid md:grid-cols-3 gap-6 text-sm">
+            <div className="p-6 rounded-3xl border border-[#7a6161] bg-[#5c4646]">
+              <div className="font-semibold">Shop</div>
+              <div className="mt-1 text-gray-200">Urbarber Barbershop</div>
+              <div className="text-gray-200">218 River Road E Kitchener</div>
+            </div>
+            <div className="p-6 rounded-3xl border border-[#7a6161] bg-[#5c4646]">
+              <div className="font-semibold">Hours</div>
+              <div className="mt-1 text-gray-200">Mon – Sun:</div>
+              <div className="mt-1 text-gray-200">10:00AM – 10:00PM</div>
+            </div>
+            <div className="p-6 rounded-3xl border border-[#7a6161] bg-[#5c4646]">
+              <div className="font-semibold">Reach us</div>
+              <div className="mt-1 text-gray-200">Phone: (437) 566 1645</div>
+              <div className="text-gray-200">Email: austinamadi.e@gmail.com</div>
+            </div>
+          </div>
+        </section>
+      </main>
+
+      {/* FOOTER */}
+      <footer className="border-t border-[#6b5555] bg-[#4a3a3a]">
+        <div className="max-w-6xl mx-auto px-4 py-8 text-sm text-gray-200 flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <UrbarberLogo className="w-6 h-6" />
+            <span>© {new Date().getFullYear()} Urbarber</span>
+          </div>
+          <a href="#booking" className="hover:opacity-80">Book now</a>
+        </div>
+      </footer>
+    </div>
+  );
 }
