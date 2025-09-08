@@ -138,39 +138,40 @@ export default function App() {
     window.open(gcUrl, "_blank");
 
     // 3) (Optional) Write into your own Google Calendar via Vercel function
-    try {
-      const webhook = import.meta.env.VITE_BOOKING_WEBHOOK_URL;
-      if (webhook) {
-        const res = await fetch(webhook, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            // "X-Booking-Key": import.meta.env.VITE_BOOKING_SECRET || "", // optional shared secret
-          },
-          body: JSON.stringify({
-            fullName: form.fullName,
-            gender: form.gender,
-            email: form.email,
-            phone: form.phone,
-            start: startLocal.toISOString(),
-            end: endLocal.toISOString(),
-            inHome: form.inHome,
-            location,
-            notes: form.notes,
-            price,
-          }),
-        });
-        const data = await res.json().catch(() => ({}));
-        if (res.ok) {
-          console.log("Booked on server:", data);
-        } else {
-          console.warn("Booking server error:", data);
-        }
-      }
-    } catch (e) {
-      console.error(e);
+    // 3) Write into your shop Google Calendar via Apps Script webhook
+try {
+  const webhook = import.meta.env.VITE_BOOKING_WEBHOOK_URL;
+  if (webhook) {
+    const res = await fetch(webhook, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        fullName: form.fullName,
+        gender: form.gender,
+        email: form.email,
+        phone: form.phone,
+        start: startLocal.toISOString(),
+        end: endLocal.toISOString(),
+        inHome: form.inHome,
+        location,
+        notes: form.notes,
+        price,
+        // secret: import.meta.env.VITE_BOOKING_SECRET, // optional
+      }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (res.ok && data.ok) {
+      console.log("Booked on server:", data);
+      // alert("Booked & added to our shop calendar!");
+    } else {
+      console.warn("Booking server error:", data);
     }
-  };
+  }
+} catch (e) {
+  console.error("Webhook call failed:", e);
+}
+  }; // <-- Add this closing brace to end handleBook
+
 
   /* ==== Services with images ==== */
   const SERVICES = [
